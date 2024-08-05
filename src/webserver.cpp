@@ -1,25 +1,17 @@
 #include "webserver.h"
 
 #include <iostream>
-#include <string.h>
+#include <cstring>
 
 int NotFoundHandler(const Request& req, Response& resp) {
     resp.code = 404;
     strcpy(resp.status, "Not Found");
-    resp.body[0] = '\0';
+    strcpy(resp.body, "\r\n");
     return 0;
 }
 
-Webserver::Webserver(const int port, const char *addr, WiFiServer *srv) {
+Webserver::Webserver(WiFiServer *srv) {
     this->handler_count = 0;
-    this->port = port;
-    if (port <= 0) {
-        this->port = 80;
-    }
-    strcpy(this->address, "0.0.0.0");
-    if (addr != nullptr) {
-        strcpy(this->address, addr);
-    }
     this->srv = srv;
 }
 
@@ -41,13 +33,18 @@ int Webserver::register_handler(const char* verb, const char *path, handler h) {
     // We have open slots, and a valid configuration. Save the path against the requested function pointer.
     strcpy(this->handlers[this->handler_count].verb, verb);
     strcpy(this->handlers[this->handler_count].path, path);
+    Serial.print("registering handler for '");
+    Serial.print(this->handlers[this->handler_count].verb);
+    Serial.print(" ");
+    Serial.print(this->handlers[this->handler_count].path);
+    Serial.println("'");
     this->handlers[this->handler_count].func = h;
+    this->handler_count++;
 
     return 1;
 }
 
-int Webserver::listen_once(Response& out) {
-    WiFiClient client = this->srv->available();
+int Webserver::listen_once(WiFiClient &client, Response& out) {
     if (!client) {
         return 0;
     }
@@ -60,19 +57,25 @@ int Webserver::listen_once(Response& out) {
     int error_code = 0;
     bytes_read = req.read_verb_line(client, error_code);
     if (error_code != 0) {
-        // Serial.println("Failed to read verb line");
         out.code = error_code;
         if (out.code == 404) {
             strcpy(out.status, "Not Found");
         }
-        return 0;
+        return 1;
     }
+    Serial.print("Read first line: ");
+    Serial.print(req.verb);
+    Serial.print(" " );
+    Serial.println(req.path);
 
     // Read the headers until you reach an empty line
     for (int i=0; i < MAX_HEADER_COUNT; ++i) {
         int current_header_count = req.read_header_line(client, error_code);
-        if (current_header_count < 0) {
-            // an error occurred
+        if (current_header_count == -2) {
+            // indicates empty string
+            break;
+        } else if (current_header_count < 0) {
+            // other errors
             if (error_code == 400) {
                 strcpy(out.status, "Bad Request");
             }
@@ -80,11 +83,10 @@ int Webserver::listen_once(Response& out) {
                 strcpy(out.status, "Internal Server Error");
             }
             return 0;
+        } else {
+            // success, new header read in
         }
-        if (current_header_count == 0) {
-            // line was empty
-            break;
-        }
+
     }
 
     // Read the body
@@ -104,6 +106,22 @@ int Webserver::listen_once(Response& out) {
         req.body[body_read] = c;
         ++body_read;
     }
+
+    // Now that we have populated the Request, decide what to do with it.
+    auto h = choose_handler(req);
+    if (h == nullptr) {
+        h = &NotFoundHandler;
+    }
+
+    const int success = h(req, out);
+    if (!success) {
+        Serial.print("Error handling request ");
+        Serial.println(success);
+        out.code = 500;
+        strcpy(out.status, "Internal Server Error");
+        return 1;
+    }
+
     return 1;
 }
 
@@ -114,67 +132,50 @@ handler Webserver::choose_handler(const Request& req) {
         }
     }
 
+    Serial.println("Using default handler: NotFound");
     return &NotFoundHandler;
 }
 
 int HeaderSet::read_header_line(WiFiClient& c, int& error_code_out) {
-    // read in the whole line, trimming the "\r\n" at the end, and keeping track of where the ':' separator was.
-    char buf[MAX_HEADER_LENGTH];
-    int bytes_read = 0;
-    int sep_pos = -1;
-    for (bytes_read=0; bytes_read < MAX_HEADER_LENGTH; ++bytes_read) {
-        buf[bytes_read] = c.read();
-        if (buf[bytes_read] == ':') {
-            sep_pos = bytes_read;
-        }
-        if (buf[bytes_read] == '\n') {
-            break;
-        }
-    }
-
-    // check for error and edge cases
-    if (bytes_read < 2) {
-        // the line was missing the '\r' before the '\n'
-        error_code_out = 400;
-        return -1;
-    }
-    if (bytes_read == 2) {
-        // empty line. This is "valid", insofar as it marks the end of the header section
-        error_code_out = 0;
-        return 0;
-    }
-
-    if (sep_pos < 0) {
-        // not a properly-formed header
-        error_code_out = 400;
-        return -1;
-    }
-
     if (this->header_count == MAX_HEADER_COUNT) {
         // valid header, but more than this library can handle
+        Serial.println("Aborting HTTP read - too many headers");
         error_code_out = 500;
         return -1;
     }
 
-    if (strlen(buf+sep_pos+1) == 0) {
-        // separator at the end of the line
+    String header_str = c.readStringUntil('\r');
+    header_str.trim();
+    if (header_str.length() == 0) {
+        // empty line
+        error_code_out = 0;
+        return -2;
+    }
+
+    int sep_index = header_str.indexOf(':');
+    if (sep_index < 0) {
+        Serial.println("empty header key");
+        // invalid header line
+        error_code_out = 400;
+        return -1;
+    }
+    this->headers[this->header_count].key = header_str.substring(0, sep_index);
+    this->headers[this->header_count].val = header_str.substring(sep_index+1);
+
+    if (this->headers[this->header_count].key.length() == 0) {
+        Serial.println("Error: empty header key");
+        error_code_out = 400;
+        return -1;
+    }
+    if (this->headers[this->header_count].val.length() == 0) {
+        Serial.println("Error: empty header val");
         error_code_out = 400;
         return -1;
     }
 
-    // replace the \r\n characters with '\0' to terminate the string
-    for (int i=sep_pos; i < bytes_read; ++i) {
-        if (buf[i] == '\n' || buf[i] == '\r') {
-            buf[i] = '\0';
-        }
-    }
-
-    // Parse a Header object
-    buf[sep_pos] = '\n';
-    strcpy(this->headers[this->header_count].key, buf);
-    strcpy(this->headers[this->header_count].val, buf+sep_pos+1);
     this->header_count++;
     error_code_out = 0;
+
     return this->header_count;
 }
 
@@ -198,7 +199,7 @@ int Request::read_verb_line(WiFiClient& c, int& error_code_out) {
         if (this->verb[i] == ' ') {
             // We've finished reading the verb part of the line.
             // Null-terminate the string and break out of the loop.
-            this->verb[i] = '\n';
+            this->verb[i] = '\0';
             break;
         }
     }
@@ -209,13 +210,14 @@ int Request::read_verb_line(WiFiClient& c, int& error_code_out) {
         bytes_read++;
         if (this->path[i] == '\n') {
             // invalid request
+            Serial.println("Error: got newline while reading path.");
             error_code_out = 400;
             return bytes_read;
         }
         if (this->path[i] == ' ') {
             // finished reading the path part of the line.
             // Null-terminate the string and break out of the loop.
-            this->path[i] = '\n';
+            this->path[i] = '\0';
             break;
         }
     }
@@ -229,4 +231,53 @@ int Request::read_verb_line(WiFiClient& c, int& error_code_out) {
     // Success!
     error_code_out = 0;
     return bytes_read;
+}
+
+void HeaderSet::write(WiFiClient& client) {
+    for (const auto& header : this->headers) {
+        header.write(client);
+    }
+}
+
+void Header::write(WiFiClient &client) const {
+    if (this->key.length() == 0) {
+        return;
+    }
+    client.print(this->key.c_str());
+    client.print(": ");
+    client.println(this->val.c_str());
+}
+
+
+void Response::write(WiFiClient& client) {
+    if (this->code == 0) {
+        Serial.println("Error: No status code set");
+        this->code = 204;
+    }
+    if (strlen(this->status) == 0) {
+        Serial.println("Error: No status message set");
+        strcpy(this->status, "No Content");
+    }
+    // always send Connection: close header
+    this->headers.add("Connection", "close");
+    client.print("HTTP/1.1 ");
+    client.print(this->code);
+    client.print(" ");
+    client.println(this->status);
+    this->headers.write(client);
+    client.print("\n"); // empty line between headers and body
+    if (strlen(this->body) > 0) {
+        client.write(this->body);
+        client.write("\r\n\r\n");
+    }
+}
+
+void HeaderSet::add(const String& key, const String& val) {
+    if (this->header_count == MAX_HEADER_COUNT) {
+        // TODO: signal error
+        return;
+    }
+    this->headers[this->header_count].key = key;
+    this->headers[this->header_count].val = val;
+    this->header_count++;
 }

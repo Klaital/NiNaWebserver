@@ -13,17 +13,21 @@
 
 class Header {
 public:
-    char key[MAX_HEADER_LENGTH];
-    char val[MAX_HEADER_LENGTH];
+    String key;
+    String val;
+
+    void write(WiFiClient& client) const;
 };
 
 class HeaderSet {
 public:
     Header headers[MAX_HEADER_COUNT];
-    int header_count;
+    int header_count = 0;
 
     int find(char *key); // returns the index of the header with the specified key. TODO: add case-insensitivity
+    void add(const String& key, const String& val); // add a header manually
     int read_header_line(WiFiClient& c, int &error_code_out);
+    void write(WiFiClient& client);
 };
 
 class Request {
@@ -43,6 +47,11 @@ public:
     char status[22];
     HeaderSet headers;
     char body[MAX_BODY_LENGTH];
+
+    Response(): code(0), status{}, headers(), body{} {
+    }
+
+    void write(WiFiClient& client);
 };
 
 typedef int (*handler)(const Request&, Response&);
@@ -53,18 +62,19 @@ public:
     char verb[10];
     char path[MAX_PATH_LENGTH];
     int (*func)(const Request&, Response&); // handler func
+
+    HandlerReg(): verb{}, path{}, func(nullptr) {
+    }
 };
 
 class Webserver {
 private:
-    int port;
-    char address[17]; // should default to "0.0.0.0"
     WiFiServer *srv;
-    HandlerReg handlers[MAX_HANDLERS];
+    HandlerReg handlers[MAX_HANDLERS]{};
     int handler_count;
 
 public:
-    Webserver(const int port, const char *addr, WiFiServer* srv);
+    explicit Webserver(WiFiServer* srv);
 
     // Register handlers against specific paths
     int register_handler(const char *verb, const char *path, handler h);
@@ -73,14 +83,14 @@ public:
     handler choose_handler(const Request& req);
 
     // call this in setup()
-    void begin() {
+    void begin() const {
         if (this->srv != nullptr) {
             this->srv->begin();
         }
     }
 
     // call this in loop()
-    int listen_once(Response& out);
+    int listen_once(WiFiClient &client, Response& out);
 };
 
 #endif //NINAWEBSERVER_LIBRARY_H
