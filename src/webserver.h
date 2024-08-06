@@ -32,12 +32,12 @@ public:
 
 class Request {
 public:
-    char verb[10];
-    char path[MAX_PATH_LENGTH];
+    String verb;
+    String path;
     HeaderSet headers;
-    char body[MAX_BODY_LENGTH];
+    String body;
 
-    int read_verb_line(WiFiClient& c, int &error_code_out);
+    int read_verb_line(WiFiClient& c);
     int read_header_line(WiFiClient& c, int &error_code_out);
 };
 
@@ -46,7 +46,7 @@ public:
     int code;
     char status[22];
     HeaderSet headers;
-    char body[MAX_BODY_LENGTH];
+    String body;
 
     Response(): code(0), status{}, headers(), body{} {
     }
@@ -80,7 +80,7 @@ public:
     int register_handler(const char *verb, const char *path, handler h);
 
     // pick a handler based on the verb+path
-    handler choose_handler(const Request& req);
+    handler choose_handler(const Request& req) const;
 
     // call this in setup()
     void begin() const {

@@ -6,7 +6,7 @@
 int NotFoundHandler(const Request& req, Response& resp) {
     resp.code = 404;
     strcpy(resp.status, "Not Found");
-    strcpy(resp.body, "\r\n");
+    resp.body = "";
     return 0;
 }
 
@@ -51,24 +51,16 @@ int Webserver::listen_once(WiFiClient &client, Response& out) {
 
     // Read the incoming request
     Request req;
-    int bytes_read = 0;
 
     // Read the first line. Expected to be "VERB /path/ HTTP/x.y"
-    int error_code = 0;
-    bytes_read = req.read_verb_line(client, error_code);
-    if (error_code != 0) {
-        out.code = error_code;
-        if (out.code == 404) {
-            strcpy(out.status, "Not Found");
-        }
+    if (!req.read_verb_line(client)) {
+        out.code = 400;
+        strcpy(out.status, "Bad Request");
         return 1;
     }
-    Serial.print("Read first line: ");
-    Serial.print(req.verb);
-    Serial.print(" " );
-    Serial.println(req.path);
 
     // Read the headers until you reach an empty line
+    int error_code = 0;
     for (int i=0; i < MAX_HEADER_COUNT; ++i) {
         int current_header_count = req.read_header_line(client, error_code);
         if (current_header_count == -2) {
@@ -90,21 +82,11 @@ int Webserver::listen_once(WiFiClient &client, Response& out) {
     }
 
     // Read the body
-    int body_read = 0;
-    char c;
-    while(client.available()) {
-        c = client.read();
-        if (bytes_read >= MAX_BODY_LENGTH) {
-            // request too long
-            out.code = 413;
-            strcpy(out.status, "Content Too Large");
-            client.stop();
-            break;
-        }
-        ++bytes_read;
-
-        req.body[body_read] = c;
-        ++body_read;
+    if (client.available()) {
+        req.body = client.readString();
+        req.body.trim();
+    } else {
+        req.body = "";
     }
 
     // Now that we have populated the Request, decide what to do with it.
@@ -125,9 +107,9 @@ int Webserver::listen_once(WiFiClient &client, Response& out) {
     return 1;
 }
 
-handler Webserver::choose_handler(const Request& req) {
+handler Webserver::choose_handler(const Request& req) const {
     for (int i=0; i < this->handler_count; i++) {
-        if (strcmp(req.verb, this->handlers[i].verb) == 0 && strcmp(req.path, this->handlers[i].path) == 0) {
+        if (req.verb == this->handlers[i].verb && req.path == this->handlers[i].path) {
             return this->handlers[i].func;
         }
     }
@@ -183,54 +165,25 @@ int Request::read_header_line(WiFiClient& c, int &error_code_out) {
     return this->headers.read_header_line(c, error_code_out);
 }
 
-int Request::read_verb_line(WiFiClient& c, int& error_code_out) {
-    int i;
-    int bytes_read = 0;
-
+int Request::read_verb_line(WiFiClient& c) {
     // read the verb
-    for (i=0; i < 10; ++i) {
-        this->verb[i] = c.read();
-        bytes_read++;
-        if (this->verb[i] == '\n') {
-            // invalid request
-            error_code_out = 400;
-            return bytes_read;
-        }
-        if (this->verb[i] == ' ') {
-            // We've finished reading the verb part of the line.
-            // Null-terminate the string and break out of the loop.
-            this->verb[i] = '\0';
-            break;
-        }
+    this->verb = c.readStringUntil(' ');
+    if (this->verb.length() == 0) {
+        return 0;
     }
-
     // read the path
-    for (i=0; i < MAX_PATH_LENGTH; ++i) {
-        this->path[i] = c.read();
-        bytes_read++;
-        if (this->path[i] == '\n') {
-            // invalid request
-            Serial.println("Error: got newline while reading path.");
-            error_code_out = 400;
-            return bytes_read;
-        }
-        if (this->path[i] == ' ') {
-            // finished reading the path part of the line.
-            // Null-terminate the string and break out of the loop.
-            this->path[i] = '\0';
-            break;
-        }
+    this->path = c.readStringUntil(' ');
+    if (this->path.length() == 0) {
+        return 0;
     }
-
-    // read the rest
-    while (c.read() != '\n') {
-        bytes_read++;
-        // we don't really care what else is in this line
+    // read the http version
+    const String tmp = c.readStringUntil('\n');
+    if (tmp.length() == 0) {
+        return 0;
     }
 
     // Success!
-    error_code_out = 0;
-    return bytes_read;
+    return 1;
 }
 
 void HeaderSet::write(WiFiClient& client) {
@@ -260,15 +213,20 @@ void Response::write(WiFiClient& client) {
     }
     // always send Connection: close header
     this->headers.add("Connection", "close");
+    // If there is a body to send, set the content-length header as well
+    if (this->body.length() > 0) {
+        const String len(this->body.length());
+        this->headers.add("Content-Length", len);
+    }
     client.print("HTTP/1.1 ");
     client.print(this->code);
     client.print(" ");
     client.println(this->status);
     this->headers.write(client);
-    client.print("\n"); // empty line between headers and body
-    if (strlen(this->body) > 0) {
-        client.write(this->body);
-        client.write("\r\n\r\n");
+    client.print("\r\n"); // empty line between headers and body
+    if (this->body.length() > 0) {
+        client.print(this->body);
+        client.print("\r\n\r\n");
     }
 }
 
